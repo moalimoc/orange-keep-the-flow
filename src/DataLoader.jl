@@ -1,7 +1,12 @@
 module DataLoader
 
-using JSON3
-using Graphs
+using JSON3, Graphs
+
+# Export the public API
+export NetworkGraph,
+       load_network, load_demands, load_scenario, load_instance,
+       json_id, node_name, vertex_from_json_id, edge_attributes,
+       capacity_matrix, metric_matrix
 
 # ------------------------------------------------------------------------------
 # 1. Data structures
