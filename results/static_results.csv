@@ -1,0 +1,2 @@
+instance,n_vertices,n_edges,n_demands,max_segments,status,objective,cpu_time,gap
+setA-01,20,80,40,6,OPTIMAL,320.1327000000086,6.4015655517578125,0.0

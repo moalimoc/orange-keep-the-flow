@@ -1,12 +1,8 @@
 module ECMP
 
-using Graphs
-include("DataLoader.jl")
-using .DataLoader
+using Graphs, Main.DataLoader   # <-- Main.DataLoader
 
-# ------------------------------------------------------------------------------
-# 1. All-pairs shortest paths with path counts
-# ------------------------------------------------------------------------------
+export compute_r_all_pairs
 
 function all_pairs_shortest_data(g::AbstractGraph, distmx::AbstractMatrix)
     n = nv(g)
@@ -22,59 +18,43 @@ function all_pairs_shortest_data(g::AbstractGraph, distmx::AbstractMatrix)
     return dist, pathcount
 end
 
-# ------------------------------------------------------------------------------
-# 2. Compute r for all pairs and arcs
-# ------------------------------------------------------------------------------
-
-function compute_r_all_pairs(net::NetworkGraph)
+function compute_r_all_pairs(net)
     g = net.graph
     n = nv(g)
     D = metric_matrix(net)
     dist, pathcount = all_pairs_shortest_data(g, D)
 
-    arcs = [(src(e), dst(e)) for e in edges(g)]
-    arc_set = Set(arcs)
+    unique_arcs = collect(keys(net.unique_edge_data))
 
-    # r_seg[(i,j)] = Dict((u,v) => fraction)
     r_seg = Dict{Tuple{Int,Int}, Dict{Tuple{Int,Int},Float64}}()
-    # r_arc[(u,v)] = Dict((i,j) => fraction)
     r_arc = Dict{Tuple{Int,Int}, Dict{Tuple{Int,Int},Float64}}()
 
-    # For each pair (i,j) that is reachable
     for i in vertices(g)
         for j in vertices(g)
-            if i == j
-                continue
-            end
-            if !isfinite(dist[i, j])
-                continue
-            end
+            i == j && continue
+            !isfinite(dist[i, j]) && continue
             sigma_ij = pathcount[i, j]
-            if sigma_ij == 0
-                continue
-            end
+            sigma_ij == 0 && continue
 
-            # For each arc (u,v), check if it lies on a shortest path from i to j
             seg_dict = Dict{Tuple{Int,Int},Float64}()
-            for (u,v) in arcs
+            for (u, v) in unique_arcs
                 if isfinite(dist[i, u]) && isfinite(dist[v, j])
                     if isapprox(dist[i, u] + D[u, v] + dist[v, j], dist[i, j]; atol=1e-9)
                         frac = (pathcount[i, u] * pathcount[v, j]) / sigma_ij
                         if frac > 0
-                            seg_dict[(u,v)] = frac
+                            seg_dict[(u, v)] = frac
                         end
                     end
                 end
             end
 
             if !isempty(seg_dict)
-                r_seg[(i,j)] = seg_dict
-                # Also fill r_arc
-                for ((u,v), frac) in seg_dict
-                    if !haskey(r_arc, (u,v))
-                        r_arc[(u,v)] = Dict{Tuple{Int,Int},Float64}()
+                r_seg[(i, j)] = seg_dict
+                for ((u, v), frac) in seg_dict
+                    if !haskey(r_arc, (u, v))
+                        r_arc[(u, v)] = Dict{Tuple{Int,Int},Float64}()
                     end
-                    r_arc[(u,v)][(i,j)] = frac
+                    r_arc[(u, v)][(i, j)] = frac
                 end
             end
         end
@@ -82,21 +62,5 @@ function compute_r_all_pairs(net::NetworkGraph)
 
     return r_seg, r_arc
 end
-
-# ------------------------------------------------------------------------------
-# 3. Helper to get list of reachable segments
-# ------------------------------------------------------------------------------
-
-function reachable_segments(net::NetworkGraph)
-    g = net.graph
-    pairs = [(i,j) for i in vertices(g) for j in vertices(g) if i != j && has_path(g, i, j)]
-    return pairs
-end
-
-# ------------------------------------------------------------------------------
-# 4. Optional: compute r for specific demands only (older version)
-# ------------------------------------------------------------------------------
-
-# ... (keep the old compute_r if needed, but we'll use the new one)
 
 end # module

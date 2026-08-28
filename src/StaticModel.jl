@@ -1,50 +1,25 @@
 module StaticModel
 
-using JuMP, HiGHS
+using JuMP, HiGHS, Graphs, Main.DataLoader, Main.ECMP
 
-# Load DataLoader as a local module
-include("DataLoader.jl")
-using .DataLoader
+export solve_static
 
-# Load ECMP as a local module (if you need functions from it)
-include("ECMP.jl")
-using .ECMP
+function solve_static(net, demands, maxSeg, r_arc, time_limit)
 
-# ------------------------------------------------------------------------------
-# Helper: get list of arcs with non-zero r coefficients
-# ------------------------------------------------------------------------------
+    n = nv(net.graph)
+    n_demands = length(demands)
 
-function get_active_arcs(r_arc::Dict)
-    return collect(keys(r_arc))
-end
+    all_arcs = net.all_arcs
+    n_arcs = length(all_arcs)
 
-# ------------------------------------------------------------------------------
-# Helper: get all segments (i,j) that appear in r_arc
-# ------------------------------------------------------------------------------
-
-function get_active_segments(r_arc::Dict)
+    # Get all segments from r_arc
     seg_set = Set{Tuple{Int,Int}}()
     for (arc, segdict) in r_arc
         for (seg, _) in segdict
             push!(seg_set, seg)
         end
     end
-    return collect(seg_set)
-end
-
-# ------------------------------------------------------------------------------
-# Build and solve the static model (time period 0 only)
-# ------------------------------------------------------------------------------
-
-function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
-                      r_arc::Dict, time_limit::Float64)
-
-    n = nv(net.graph)
-    n_demands = length(demands)
-
-    # Get arcs and segments
-    arcs = get_active_arcs(r_arc)
-    segments = get_active_segments(r_arc)
+    segments = collect(seg_set)
     seg_index = Dict(seg => idx for (idx, seg) in enumerate(segments))
     n_segments = length(segments)
 
@@ -53,12 +28,10 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
         return :INFEASIBLE, 0.0, 0.0, nothing
     end
 
-    # Build model
     model = Model(HiGHS.Optimizer)
     set_time_limit_sec(model, time_limit)
     set_silent(model)
 
-    # --- Variables: x[d, seg_idx] binary ---
     x = Dict{Tuple{Int,Int}, VariableRef}()
     for d in 1:n_demands
         for (idx, (i,j)) in enumerate(segments)
@@ -66,13 +39,11 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
         end
     end
 
-    # --- Flow conservation constraints (1) ---
     for d in 1:n_demands
         s = vertex_from_json_id(net, demands[d].s)
         t = vertex_from_json_id(net, demands[d].t)
 
         for v in vertices(net.graph)
-            # Incoming: sum over i where (i,v) exists
             incoming = AffExpr(0.0)
             for i in vertices(net.graph)
                 if haskey(seg_index, (i, v))
@@ -81,7 +52,6 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
                 end
             end
 
-            # Outgoing: sum over j where (v,j) exists
             outgoing = AffExpr(0.0)
             for j in vertices(net.graph)
                 if haskey(seg_index, (v, j))
@@ -96,12 +66,10 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
             elseif v == t
                 rhs = -1.0
             end
-
             @constraint(model, incoming - outgoing == rhs)
         end
     end
 
-    # --- Segment limit constraint (2) ---
     for d in 1:n_demands
         expr = AffExpr(0.0)
         for idx in 1:n_segments
@@ -110,17 +78,16 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
         @constraint(model, expr <= maxSeg)
     end
 
-    # --- Load variables ---
-    load = Dict{Tuple{Int,Int}, VariableRef}()
-    for arc in arcs
-        load[arc] = @variable(model, lower_bound=0, base_name="load_$(arc)")
+    load = Dict{Int, VariableRef}()
+    for arc_idx in 1:n_arcs
+        load[arc_idx] = @variable(model, lower_bound=0, base_name="load_arc_$(arc_idx)")
     end
 
-    # --- Load constraints (3) ---
-    for arc in arcs
-        expr = AffExpr(0.0)
-        segdict = r_arc[arc]
+    for (unique_arc_key, segdict) in r_arc
+        arc_indices = get(net.arc_groups, unique_arc_key, Int[])
+        isempty(arc_indices) && continue
 
+        expr = AffExpr(0.0)
         for ((i,j), frac) in segdict
             seg_idx = seg_index[(i,j)]
             for d in 1:n_demands
@@ -130,40 +97,25 @@ function solve_static(net::NetworkGraph, demands::Vector, maxSeg::Int,
             end
         end
 
-        @constraint(model, load[arc] == expr)
+        for arc_idx in arc_indices
+            @constraint(model, load[arc_idx] == expr)
+            u, v, id, metric, cap = all_arcs[arc_idx]
+            @constraint(model, load[arc_idx] <= cap)
+        end
     end
 
-    # --- Objective: minimize maximum load (a surrogate for lexicographic) ---
     L = @variable(model, lower_bound=0, base_name="L")
-    for arc in arcs
-        @constraint(model, load[arc] <= L)
+    for arc_idx in 1:n_arcs
+        @constraint(model, load[arc_idx] <= L)
     end
     @objective(model, Min, L)
 
-    # --- Solve ---
     optimize!(model)
 
     status = termination_status(model)
-    obj_val = 0.0
-    if status == OPTIMAL || status == ALMOST_OPTIMAL
-        obj_val = value(L)
-    end
-
-    solve_time = solve_time(model)
-
-    # Optionally, you can retrieve the solution values for x and load
-    # For now, we just return the key results
-
+    obj_val = (status == OPTIMAL || status == ALMOST_OPTIMAL) ? value(L) : 0.0
+    solve_time = JuMP.solve_time(model)
     return status, obj_val, solve_time, model
 end
-
-# ------------------------------------------------------------------------------
-# A more advanced lexicographic objective (commented out for simplicity)
-# ------------------------------------------------------------------------------
-
-# function solve_lexicographic(...)
-#     # Sequential solves: min L1, fix, min L2, etc.
-#     # This is left as an extension
-# end
 
 end # module
